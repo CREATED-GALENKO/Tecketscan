@@ -1,0 +1,159 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
+  <title>Gala Scanner</title>
+  <style>
+    :root { --bg: #f8fafc; --card: #ffffff; --primary: #3b82f6; --text: #0f172a; --muted: #64748b; --radius: 16px; }
+    * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
+    body { margin: 0; font-family: -apple-system, BlinkMacSystemFont, sans-serif; background: var(--bg); color: var(--text); min-height: 100vh; display: flex; justify-content: center; align-items: center; padding: 16px; }
+    .app { background: var(--card); width: 100%; max-width: 420px; border-radius: var(--radius); box-shadow: 0 10px 25px -5px rgba(0,0,0,0.1); padding: 24px; text-align: center; }
+    h1 { font-size: 22px; margin: 0 0 16px; font-weight: 700; }
+    h2 { font-size: 16px; margin: 0 0 14px; color: var(--muted); font-weight: 500; }
+    input { width: 100%; padding: 14px; border: 2px solid #e2e8f0; border-radius: 12px; font-size: 16px; margin-bottom: 12px; outline: none; }
+    input:focus { border-color: var(--primary); }
+    button { width: 100%; padding: 14px; border: none; border-radius: 12px; background: var(--primary); color: white; font-size: 16px; font-weight: 600; cursor: pointer; transition: 0.2s; margin-bottom: 8px; }
+    button:hover { opacity: 0.9; }
+    button:active { transform: scale(0.98); }
+    button.secondary { background: #e2e8f0; color: var(--text); }
+    button:disabled { opacity: 0.5; cursor: not-allowed; }
+    .step { display: none; animation: fadeIn 0.3s ease; }
+    .step.active { display: block; }
+    #reader { width: 100%; aspect-ratio: 1/1; background: #000; border-radius: 12px; overflow: hidden; margin: 16px 0; display: none; }
+    .status-box { margin-top: 16px; padding: 14px; border-radius: 12px; font-weight: 500; background: #f1f5f9; min-height: 48px; display: flex; align-items: center; justify-content: center; }
+    .success { background: #dcfce7; color: #065f46; }
+    .error { background: #fee2e2; color: #991b1b; }
+    .warning { background: #fef3c7; color: #92400e; }
+    .controls { display: flex; gap: 8px; margin-top: 12px; }
+    .controls button { margin-bottom: 0; flex: 1; }
+    .hidden { display: none !important; }
+    @keyframes fadeIn { from { opacity: 0; transform: translateY(10px); } to { opacity: 1; transform: translateY(0); } }
+  </style>
+  <script src="https://unpkg.com/html5-qrcode@2.3.8/html5-qrcode.min.js"></script>
+</head>
+<body>
+  <div class="app">
+    <h1>🎟️ Gala Scanner</h1>
+    <div id="step1" class="step active">
+      <h2>1. URL веб-приложения</h2>
+      <input type="url" id="apiUrl" placeholder="https://script.google.com/macros/s/.../exec">
+      <button onclick="saveUrl()">Подключиться →</button>
+    </div>
+    <div id="step2" class="step">
+      <h2>2. Пароль доступа</h2>
+      <input type="password" id="apiPass" placeholder="••••••••">
+      <button id="authBtn" onclick="checkAuth()">Проверить доступ</button>
+      <div id="authStatus" class="status-box hidden"></div>
+    </div>
+    <div id="step3" class="step">
+      <div id="reader"></div>
+      <button id="camBtn" onclick="initCamera()">📷 Запустить камеру</button>
+      <div class="controls">
+        <button class="secondary" onclick="toggleManual()">✍️ Ввести ID</button>
+        <button class="secondary" onclick="location.reload()">🔄 Сброс</button>
+      </div>
+      <input type="text" id="manualId" class="hidden" placeholder="ID билета">
+      <button id="manualCheck" class="hidden secondary" onclick="scanManual()">Проверить</button>
+      <div id="scanStatus" class="status-box">Готов к работе</div>
+    </div>
+  </div>
+
+  <script>
+    let API_URL = '', PASSWORD = '', lastScan = 0;
+    let qrScanner = null;
+
+    function saveUrl() {
+      const url = document.getElementById('apiUrl').value.trim();
+      if (!url.endsWith('/exec')) return alert('URL должен заканчиваться на /exec');
+      API_URL = url; switchStep('step1', 'step2');
+    }
+
+    async function checkAuth() {
+      const pwd = document.getElementById('apiPass').value.trim();
+      if (!pwd) return setStatus('authStatus', '❌ Введите пароль', 'error');
+      const btn = document.getElementById('authBtn'); btn.disabled = true; btn.innerText = '⏳';
+      try {
+        const res = await fetch(`${API_URL}?pwd=${encodeURIComponent(pwd)}&id=CHECK_AUTH`);
+        const data = await res.json();
+        if (data.status === 'success') { PASSWORD = pwd; switchStep('step2', 'step3'); }
+        else setStatus('authStatus', data.message, 'error');
+      } catch (e) { setStatus('authStatus', `❌ Нет связи: ${e.message}`, 'error'); }
+      btn.disabled = false; btn.innerText = 'Проверить доступ';
+    }
+
+    function initCamera() {
+      const reader = document.getElementById('reader');
+      const btn = document.getElementById('camBtn');
+      reader.style.display = 'block';
+      btn.disabled = true; btn.innerText = '⏳ Запрашиваем доступ...';
+
+      // 1. Явный системный запрос (гарантирует диалог на Android)
+      navigator.mediaDevices.getUserMedia({ video: { facingMode: 'environment' } })
+        .then(stream => {
+          // 2. Разрешение получено. Останавливаем тестовый поток
+          stream.getTracks().forEach(t => t.stop());
+          btn.style.display = 'none';
+
+          // 3. Запускаем сканер (разрешение уже есть, промт не повторится)
+          if (qrScanner) qrScanner.clear().catch(()=>{});
+          qrScanner = new Html5Qrcode("reader");
+          qrScanner.start(
+            { facingMode: "environment" },
+            { fps: 10, qrbox: { width: 250, height: 250 } },
+            (id) => handleScan(id),
+            () => {}
+          ).catch(err => {
+            reader.style.display = 'none'; btn.style.display = 'block'; btn.disabled = false; btn.innerText = '📷 Запустить камеру';
+            setStatus('scanStatus', '❌ Ошибка сканера: ' + err.message, 'error');
+          });
+        })
+        .catch(err => {
+          // 4. Запретили или ошибка
+          reader.style.display = 'none'; btn.style.display = 'block'; btn.disabled = false; btn.innerText = '📷 Запустить камеру';
+          setStatus('scanStatus', `❌ Камера недоступна: ${err.message}. Нажмите на замок/настройки в адресной строке и разрешите доступ.`, 'error');
+        });
+    }
+
+    function handleScan(id) {
+      if (!id || id.length < 3 || Date.now() - lastScan < 2000) return;
+      lastScan = Date.now();
+      setStatus('scanStatus', `🔍 ${id}`, '');
+      if (navigator.vibrate) navigator.vibrate(150);
+      checkTicket(id);
+    }
+
+    async function checkTicket(id) {
+      setStatus('scanStatus', '⏳ Проверка...', '');
+      try {
+        const res = await fetch(`${API_URL}?pwd=${encodeURIComponent(PASSWORD)}&id=${encodeURIComponent(id)}`);
+        const data = await res.json();
+        setStatus('scanStatus', data.message, data.status);
+        if (data.status === 'success' && navigator.vibrate) navigator.vibrate([200, 100, 200]);
+      } catch (e) { setStatus('scanStatus', '❌ Ошибка сети', 'error'); }
+    }
+
+    function toggleManual() {
+      const inp = document.getElementById('manualId');
+      const btn = document.getElementById('manualCheck');
+      inp.classList.toggle('hidden'); btn.classList.toggle('hidden');
+      if (!inp.classList.contains('hidden')) inp.focus();
+    }
+
+    function scanManual() {
+      const id = document.getElementById('manualId').value.trim();
+      if (id) checkTicket(id);
+    }
+
+    function switchStep(from, to) {
+      document.getElementById(from).classList.remove('active');
+      document.getElementById(to).classList.add('active');
+    }
+
+    function setStatus(elId, msg, type) {
+      const el = document.getElementById(elId);
+      el.innerText = msg; el.className = 'status-box ' + type;
+    }
+  </script>
+</body>
+</html>
